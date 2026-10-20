@@ -3,11 +3,13 @@ name: Daily Vent Leads
 on:
   schedule:
     - cron: '0 2 * * *' # 每天北京时间上午 10 点运行
-  workflow_dispatch:    # 允许手动点击测试
+  workflow_dispatch:
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 允许写入仓库发布网页
     timeout-minutes: 30
 
     steps:
@@ -22,17 +24,27 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          pip install requests
 
       - name: Fetch Camoufox Browser
-        run: |
-          python -m camoufox fetch
+        run: python -m camoufox fetch
 
       - name: Run Scraper
-        run: |
-          python main.py
+        run: python main.py
 
-      - name: Upload leads
+      - name: Upload CSV
         uses: actions/upload-artifact@v4
         with:
           name: leads-csv
           path: leads.csv
+
+      # 下面这三步是把 HTML 发布到 GitHub Pages
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./
+          publish_branch: gh-pages
+          keep_files: false
+          allow_empty_commit: true
+          exclude_assets: '.github,venv_stealth,*.py,*.csv,*.txt'
