@@ -1,0 +1,38 @@
+name: Daily Vent Leads
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # 每天北京时间上午 10 点运行
+  workflow_dispatch:    # 允许手动点击测试
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Fetch Camoufox Browser
+        run: |
+          python -m camoufox fetch
+
+      - name: Run Scraper
+        run: |
+          python main.py
+
+      - name: Upload leads
+        uses: actions/upload-artifact@v4
+        with:
+          name: leads-csv
+          path: leads.csv
