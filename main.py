@@ -1,16 +1,14 @@
 import asyncio, csv, re, random, os
 from datetime import datetime
 from camoufox.async_api import AsyncCamoufox
+from urllib.parse import urljoin
 
 # ==================== 精准安检词库 ====================
-# 1. 负向词库：命中即过滤（过滤掉无关广告、其他行业、废话）
 NEGATIVE_KEYWORDS = [
-    # 互联网/黑产/杂项
     "办理", "认证", "网查", "社保", "换群", "拼多多", "淘宝", "京东", 
     "刷单", "兼职日结", "免费领取", "加微信领", "扫码", "点击链接", 
     "红包", "投票", "助力", "砍价", "微商", "招代理", "游戏推广", 
     "群发助手", "测试消息", "系统消息", "互换", "接活",
-    # 其他无关行业/岗位
     "保洁", "兼职", "征婚", "网红", "论文", "自学", "家具", "名片", 
     "小店", "发明", "专利", "支架", "护照", "撤回", "境外", "早安", 
     "销售", "清洗", "拖欠", "特种", "投标", "广告", "操作机器", 
@@ -62,19 +60,15 @@ NEGATIVE_KEYWORDS = [
     "化学", "工业", "电子", "心情", "颈椎病", "包车", "约车", 
     "面包", "工位", "扎心", "引进", "茶水", "动物", "领养", 
     "开水", "水龙头", "东芝", "红娘", "婚恋", "肩颈", "不舒服", 
-    "穴位", "数字", "平台", "明星", "对象",
-    # 闲聊
-    "换着发", "别逗我", "精神小伙"
+    "穴位", "数字", "平台", "明星", "对象", "换着发", "别逗我", "精神小伙"
 ]
 
-# 2. 强权拦截词库：帖子必须包含以下至少一个词，否则直接淘汰（确保是通风行业）
 STRONG_KEYWORDS = [
     "招", "聘", "师傅", "大工", "中工", "清工", "外包", "小工", "找工人", "急招", "诚聘",
     "安装", "风管", "通风", "铁皮", "合管", "排烟", "白铁", "暖通",
     "队伍", "班组", "包工", "工地", "干活", "工资", "需人", "缺人"
 ]
 
-# 3. 极度危险的【求职/找活】词（一票否决：我们是去找老板的，不是找工人的）
 SEEKER_BLACKLIST = [
     "找活", "求职", "找工作", "求带走", "本人找", "想找个", "现有人员",
     "班组空出", "人员空出", "待业", "求收留", "找份活", "求活干", "哪个老板要",
@@ -82,7 +76,6 @@ SEEKER_BLACKLIST = [
     "求包", "本人从事", "找工作", "找点事", "接点活"
 ]
 
-# 4. 极度危险的【推销/材料】词（一票否决：过滤卖材料、卖机器的厂家）
 SPAM_BLACKLIST = [
     "厂家", "回收", "批发", "生产", "产品", "批量", "定制", "现货", "货源", "包邮", 
     "成本价", "专产", "出售", "钢管", "配套", "加工", "铝合金", "风口", "燃热", 
@@ -92,7 +85,6 @@ SPAM_BLACKLIST = [
 # ================================================
 
 OUT = "leads.csv"
-# 手机号正则：支持中间带空格或横杠，如 138 1234 5678 或 138-1234-5678
 PHONE_RE = re.compile(r"1[3-9]\d[\s\-]*\d{4}[\s\-]*\d{4}")
 
 async def human_wait(page, min_s=2, max_s=5):
@@ -100,119 +92,108 @@ async def human_wait(page, min_s=2, max_s=5):
 
 def check_text_pass(text):
     """六重安检核心逻辑"""
-    # 1. 一票否决：求职/找活
-    if any(kw in text for kw in SEEKER_BLACKLIST):
-        return False, "求职/找活拦截"
-    
-    # 2. 一票否决：推销/材料/厂家
-    if any(kw in text for kw in SPAM_BLACKLIST):
-        return False, "推销/材料拦截"
-
-    # 3. 强权拦截：必须包含至少一个强相关词（确认是通风行业）
-    if not any(kw in text for kw in STRONG_KEYWORDS):
-        return False, "非目标行业"
-
-    # 4. 负向词库：命中则淘汰（过滤掉无关信息）
+    if any(kw in text for kw in SEEKER_BLACKLIST): return False, "求职/找活拦截"
+    if any(kw in text for kw in SPAM_BLACKLIST): return False, "推销/材料拦截"
+    if not any(kw in text for kw in STRONG_KEYWORDS): return False, "非目标行业"
     for kw in NEGATIVE_KEYWORDS:
-        if kw in text:
-            return False, f"命中负向词[{kw}]"
-
+        if kw in text: return False, f"命中负向词[{kw}]"
     return True, "通过"
 
-async def main():
+async def scrape_tieba(page):
+    """源1：百度贴吧"""
     rows = []
-    # 搜索词更加精准，提高召回率
-    keywords = ["通风 招工", "通风 安装 电话", "风管 招工", "暖通 招聘", "白铁 招工", "排烟 安装", "四川 通风 安装", "成都 通风 招工"]
-    
+    keywords = ["通风 招工", "风管 招工", "四川 通风 安装", "成都 通风 招工"]
+    print("  [贴吧] 开始扫描...")
+    for kw in keywords:
+        try:
+            await page.goto(f"https://tieba.baidu.com/f/search/res?ie=utf-8&qw={kw}", wait_until="domcontentloaded", timeout=20000)
+            await human_wait(page, 2, 4)
+            if "验证" in await page.title(): 
+                print(f"    [!] 触发验证码，跳过 {kw}")
+                continue
+            
+            links = await page.locator("a[href*='/p/']").all()
+            hrefs = []
+            for l in links[:5]:
+                href = await l.get_attribute('href')
+                if href and '/p/' in href:
+                    match = re.search(r"/p/(\d+)", href)
+                    if match:
+                        clean_url = f"https://tieba.baidu.com/p/{match.group(1)}"
+                        if clean_url not in hrefs: hrefs.append(clean_url)
+            
+            for url in hrefs:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await human_wait(page, 1, 3)
+                text = await page.inner_text("body")
+                phones = [re.sub(r"[\s\-]", "", p) for p in PHONE_RE.findall(text)]
+                if phones:
+                    title = await page.title()
+                    is_pass, _ = check_text_pass(title + text)
+                    if is_pass:
+                        rows.append({"源": "贴吧", "关键词": kw, "标题": title[:60].replace("\n",""), "链接": url, "完整号码": "|".join(set(phones)), "采集时间": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                        print(f"      [+] 成功: {phones[0]} | {title[:15]}...")
+        except Exception as e:
+            pass
+    return rows
+
+async def scrape_ybrc(page):
+    """源2：宜宾人才网（结构化数据，海外不拦截）"""
+    rows = []
+    print("  [宜宾人才网] 开始扫描...")
+    urls = [
+        "https://www.ybrc128.com/recruit/search?keyword=通风",
+        "https://www.ybrc128.com/recruit/search?keyword=暖通",
+        "https://www.ybrc128.com/recruit/search?keyword=风管"
+    ]
+    for url in urls:
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await human_wait(page, 2, 4)
+            links = await page.locator("a[href*='/recruit/companyInfo']").all()
+            hrefs = list(set([urljoin("https://www.ybrc128.com", await l.get_attribute("href")) for l in links[:6] if await l.get_attribute("href")]))
+            
+            for href in hrefs:
+                await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                await human_wait(page, 1, 2)
+                text = await page.inner_text("body")
+                phones = [re.sub(r"[\s\-]", "", p) for p in PHONE_RE.findall(text)]
+                if phones:
+                    title = await page.title()
+                    is_pass, _ = check_text_pass(title + text)
+                    if is_pass:
+                        rows.append({"源": "宜宾人才网", "关键词": "搜索", "标题": title[:60].replace("\n",""), "链接": href, "完整号码": "|".join(set(phones)), "采集时间": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                        print(f"      [+] 成功: {phones[0]} | {title[:15]}...")
+        except Exception:
+            pass
+    return rows
+
+async def main():
+    all_rows = []
     print("启动云端伪装浏览器...")
     async with AsyncCamoufox(headless=True) as browser:
         page = await browser.new_page()
         
-        for kw in keywords:
-            print(f"\n🔍 正在搜索: {kw}")
-            search_url = f"https://tieba.baidu.com/f/search/res?ie=utf-8&qw={kw}"
-            
-            try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                await human_wait(page, 3, 6)
-            except Exception as e:
-                print(f"网络超时跳过: {e}")
-                continue
-
-            # 云端遇到验证码无法人工滑动，检测到验证码直接跳过该词
-            title_text = await page.title()
-            if "安全验证" in title_text or "验证" in title_text:
-                print(f"  [跳过] 触发百度风控验证，跳过当前词")
-                continue
-                
-            # 提取链接
-            links = await page.locator("a[href*='/p/']").all()
-            hrefs = []
-            for link in links[:10]: # 每个词最多看前10个帖子
-                href = await link.get_attribute("href")
-                if href and "/p/" in href:
-                    match = re.search(r"/p/(\d+)", href)
-                    if match:
-                        clean_url = f"https://tieba.baidu.com/p/{match.group(1)}"
-                        if clean_url not in hrefs:
-                            hrefs.append(clean_url)
-
-            print(f"  -> 找到 {len(hrefs)} 个帖子，开始安检抓取...")
-
-            for url in hrefs:
-                try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    await human_wait(page, 2, 4)
-                    
-                    full_text = await page.inner_text("body")
-                    raw_phones = PHONE_RE.findall(full_text)
-                    # 清洗号码（去掉空格和横杠）
-                    phones = [re.sub(r"[\s\-]", "", p) for p in raw_phones]
-
-                    if phones:
-                        post_title = await page.title()
-                        # 标题+正文组合检测，防止标题里有电话被漏掉
-                        combined_text = post_title + full_text
-                        
-                        # 进行六重安检
-                        is_pass, reason = check_text_pass(combined_text)
-                        
-                        if is_pass:
-                            unique_phones = list(set(phones))
-                            rows.append({
-                                "源": "贴吧",
-                                "关键词": kw,
-                                "标题": post_title[:80].replace("\n", ""),
-                                "链接": url,
-                                "完整号码": "|".join(unique_phones),
-                                "采集时间": datetime.now().isoformat()
-                            })
-                            print(f"    [+] ✅ 成功放行: {unique_phones} | {post_title[:20]}...")
-                        else:
-                            print(f"    [-] ❌ 拦截: {reason} | 标题: {post_title[:20]}...")
-                except Exception:
-                    continue
-                
-                await human_wait(page, 1, 3)
-
-    # 写入数据
-    if rows:
-        # 去重（避免多个搜索词抓到同一个帖子）
-        final_rows = list({r['链接']: r for r in rows}.values())
+        # 依次运行多个源
+        try: all_rows.extend(await scrape_tieba(page))
+        except Exception as e: print(f"贴吧模块崩溃: {e}")
         
-        file_exists = os.path.isfile(OUT)
-        with open(OUT, "a", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=final_rows[0].keys())
-            if not file_exists:
-                w.writeheader()
-            w.writerows(final_rows)
-        print(f"\n✅ 运行结束！共写入 {len(final_rows)} 条精准线索 -> {OUT}")
-    else:
-        print("\n❌ 本轮没找到符合安检条件的帖子。")
-        # 【兜底机制】：就算没数据，也建一个只有表头的空表，保证 GitHub 能上传 artifact
-        with open(OUT, "w", newline="", encoding="utf-8-sig") as f:
+        try: all_rows.extend(await scrape_ybrc(page))
+        except Exception as e: print(f"宜宾人才网模块崩溃: {e}")
+
+    # 写入数据（自动兜底）
+    file_exists = os.path.isfile(OUT)
+    with open(OUT, "a", newline="", encoding="utf-8-sig") as f:
+        if all_rows:
+            w = csv.DictWriter(f, fieldnames=all_rows[0].keys())
+            if not file_exists: w.writeheader()
+            w.writerows(all_rows)
+            print(f"\n✅ 运行结束！共写入 {len(all_rows)} 条精准线索 -> {OUT}")
+        else:
             w = csv.writer(f)
-            w.writerow(["源", "关键词", "标题", "链接", "完整号码", "采集时间"])
+            if not file_exists: 
+                w.writerow(["源", "关键词", "标题", "链接", "完整号码", "采集时间"])
+            print("\n❌ 本轮没找到符合安检条件的帖子。")
 
 if __name__ == "__main__":
     asyncio.run(main())
